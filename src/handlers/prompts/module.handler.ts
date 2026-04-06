@@ -48,8 +48,21 @@ src/api/${featureName}/
 ├── constants/
 │   └── ${featureName}.constants.ts
 └── dto/
-    ├── ${featureName}.dto.ts          (Zod schemas + inferred types)
+    ├── ${featureName}.dto.ts          (Zod schemas + inferred types. MUST include required_error, invalid_type_error, and custom messages for all rules)
     └── ${featureName}-swagger.dto.ts  (Class-based Swagger documentation DTOs)
+
+### 🛡️ STRICT ZOD VALIDATION (PRODUCTION STANDARDS)
+Every Zod field MUST follow this strict pattern:
+- **required_error**: Specify a clear message for missing fields.
+- **invalid_type_error**: Specify a message for type mismatches.
+- **custom messages**: All constraints (.min, .email, .enum) MUST have user-friendly error messages.
+
+Example:
+z.string({ 
+  required_error: 'Field is required', 
+  invalid_type_error: 'Field must be a string' 
+}).min(1, 'Field cannot be empty')
+
 
 ### 🛡️ STRICT IMPLEMENTATION RULES
 1. **CONTROLLER**:

@@ -22,6 +22,42 @@ export const RULE_CHUNKS = {
    - No direct class injection without token.
    - Never inject repository class directly — inject via token.
 `,
+    validation: `
+═══════════════════════════════════════════════════════════
+1.1 PRODUCTION ZOD VALIDATION STANDARDS
+═══════════════════════════════════════════════════════════
+
+4. USER-FRIENDLY ERROR MESSAGES (MANDATORY):
+   - All Zod fields MUST provide human-readable custom messages for all validation rules.
+   - These messages are the single source of truth for the entire stack.
+   - Support both explicit (Version 3) and concise (Version 4+) formats:
+     
+     ✅ Version 3 Format (Explicit):
+        z.string({ 
+          required_error: 'Field is required', 
+          invalid_type_error: 'Field must be a string' 
+        })
+     
+     ✅ Version 4+ Format (Concise Shorthand):
+        z.string({ error: 'Field is required and must be a string' })
+        z.string().min(5, { error: 'Too short!' })
+        z.uuid({ error: 'Bad UUID!' })
+
+   - Example DTO standard:
+     export const userSchema = z.object({
+       email: z.string({
+         error: 'Email is required',
+       }).email('Please enter a valid email address'),
+     });
+
+5. CONSISTENT VALIDATION ERROR RESPONSE:
+   - Error messages must be ready for frontend display without mapping.
+   - Use direct, descriptive language.
+
+6. FULL-STACK CONTRACT SYNCHRONIZATION:
+   - The DTOs and Swagger documentation generated here MUST be the source of truth for the Frontend MCP.
+   - Any change in the Zod schema or Swagger decorator MUST be reflected in the API documentation immediately.
+`,
     architecture: `
 ═══════════════════════════════════════════════════════════
 2. FEATURE STRUCTURE (MANDATORY - STRICT)
@@ -486,6 +522,11 @@ export const RULE_CHUNKS = {
    - Zero 'any'.
    - Explicit return types.
    - Proper generics usage.
+
+59. ZOD VALIDATION QUALITY (15 points):
+   - Custom messages present for all fields (using explicit required_error/invalid_type_error OR concise error: shorthand).
+   - Custom messages for all rules (min, max, email, enum, uuid, etc.).
+   - No generic Zod errors allowed.
 
 59. DATABASE COMPLIANCE (10 points):
    - No raw Sequelize inside service.

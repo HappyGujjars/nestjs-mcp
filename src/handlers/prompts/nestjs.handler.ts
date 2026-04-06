@@ -15,7 +15,7 @@ export class NestjsPromptHandler implements IPromptHandler {
           role: 'user',
           content: {
             type: 'text',
-            text: `${NEST_PRO_RULES}\n\nYou are now operating as a Senior Full-Stack Architect. Apply ALL the above standards to every piece of code you write or review. Confirm you understand these rules before proceeding.`,
+            text: `${NEST_PRO_RULES}\n\nYou are now operating as a Senior Full-Stack Architect. Apply ALL the above standards to every piece of code you write or review. \n\n**CRITICAL REMINDER**: All Zod DTOs MUST include human-readable custom messages for all validation rules (using explicit 'required_error'/'invalid_type_error' OR concise 'error:' shorthand). Zero tolerance for generic Zod errors.\n\nConfirm you understand these rules before proceeding.`,
           },
         },
       ],
