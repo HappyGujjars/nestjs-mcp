@@ -9,7 +9,8 @@ export type BoilerplatePattern =
   | 'repository-pattern'
   | 'logging-interceptor'
   | 'function-naming'
-  | 'auth-oidc-redis';
+  | 'auth-oidc-redis'
+  | 'sse-redis-architecture';
 
 export const BOILERPLATES: Record<BoilerplatePattern, string> = {
 
@@ -669,7 +670,219 @@ export class AuthController {
   @UseGuards(JwtGuard)
   async logout(@Req() req: Request) {
     return this.authService.logout(req.user.id);
-  }
+}
 }
 `,
+  'sse-redis-architecture': `
+// ─── SSE CONNECTION MANAGER ────────────────────────────────────────────────
+// src/api/sse/sse-connection.manager.ts
+import { Injectable, Logger } from '@nestjs/common';
+import { Response } from 'express';
+
+@Injectable()
+export class SseConnectionManager {
+  private readonly logger = new Logger(SseConnectionManager.name);
+  // Key format: \\\`\\\\\${userId}:\\\\\${uniqueId}\\\`
+  private readonly clientConnections = new Map<string, Response>();
+
+  addConnection(key: string, res: Response): void {
+    // Terminate existing connection safely if exists
+    if (this.clientConnections.has(key)) {
+      this.logger.warn(\\\`[SseManager] Terminating existing connection for \\\\\${key}\\\`);
+      const oldRes = this.clientConnections.get(key);
+      if (oldRes) oldRes.end();
+    }
+    
+    this.clientConnections.set(key, res);
+    this.logger.log(\\\`[SseManager] Connection added: \\\\\${key}. Active connections: \\\\\${this.clientConnections.size}\\\`);
+
+    res.on('close', () => {
+      this.logger.log(\\\`[SseManager] Connection closed by client: \\\\\${key}\\\`);
+      this.clientConnections.delete(key);
+    });
+  }
+
+  getConnection(key: string): Response | undefined {
+    return this.clientConnections.get(key);
+  }
+
+  hasConnection(key: string): boolean {
+    return this.clientConnections.has(key);
+  }
+
+  removeConnection(key: string): void {
+    const res = this.clientConnections.get(key);
+    if (res) {
+      res.end();
+      this.clientConnections.delete(key);
+      this.logger.log(\\\`[SseManager] Connection removed explicitly: \\\\\${key}\\\`);
+    }
+  }
+
+  getAllConnections(): Map<string, Response> {
+    return this.clientConnections;
+  }
+}
+
+// ─── SSE CONTROLLER ────────────────────────────────────────────────────────
+// src/api/sse/sse.controller.ts
+import { Controller, Get, Res, Query, UseGuards, Req } from '@nestjs/common';
+import { Response, Request } from 'express';
+import { JwtGuard } from '../../common/guards/jwt.guard';
+import { SseConnectionManager } from './sse-connection.manager';
+
+@Controller('sse')
+export class SseController {
+  constructor(private readonly sseManager: SseConnectionManager) {}
+
+  @Get('subscribe')
+  @UseGuards(JwtGuard)
+  subscribe(
+    @Req() req: Request,
+    @Query('deviceId') deviceId: string,
+    @Res() res: Response,
+  ) {
+    const userId = (req.user as any).id;
+    const uniqueId = deviceId || req.headers['x-forwarded-for'] || 'default-session';
+    const key = \\\`\\\\\${userId}:\\\\\${uniqueId}\\\`;
+
+    // 1. Strict Headers for Proxies (Bypass Buffering)
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.setHeader('Content-Encoding', 'none');
+    res.setHeader('cf-compression', 'disabled');
+
+    // 2. Add to Manager
+    this.sseManager.addConnection(key, res);
+
+    // 3. Initial Padding to Force Flush
+    res.write('waiting... '.repeat(1024) + '\\\\n\\\\n');
+    res.write(\\\`data: \\\\\${JSON.stringify({ message: 'Connected' })}\\\\n\\\\n\\\`);
+  }
+}
+
+// ─── REDIS STREAM SERVICE ──────────────────────────────────────────────────
+// src/api/sse/redis-stream.service.ts
+import { Injectable, OnModuleInit, Logger, OnModuleDestroy } from '@nestjs/common';
+import Redis from 'ioredis';
+import { SseConnectionManager } from './sse-connection.manager';
+// import { env } from '../../config/env'; // Adjust to your config
+
+export interface SseEventPayload {
+  userId: string | number;
+  uniqueId: string;
+  type: string;
+  data: any;
+  isFinal?: boolean; // If true, Server explicitly closes the connection
+}
+
+@Injectable()
+export class RedisStreamService implements OnModuleInit, OnModuleDestroy {
+  private readonly logger = new Logger(RedisStreamService.name);
+  private publisher: Redis;
+  private consumer: Redis;
+  private readonly streamName = 'sse-events';
+  private isConsuming = false;
+
+  constructor(private readonly sseManager: SseConnectionManager) {
+    // this.publisher = new Redis(env.REDIS_URL);
+    // this.consumer = new Redis(env.REDIS_URL);
+    this.publisher = new Redis();
+    this.consumer = new Redis();
+  }
+
+  async onModuleInit() {
+    this.isConsuming = true;
+    this.consumeStream();
+  }
+
+  onModuleDestroy() {
+    this.isConsuming = false;
+    this.publisher.disconnect();
+    this.consumer.disconnect();
+  }
+
+  // Used by other services to broadcast events
+  async publishEvent(payload: SseEventPayload) {
+    await this.publisher.xadd(this.streamName, '*', 'payload', JSON.stringify(payload));
+  }
+
+  // Fanout Consumer - Every Pod reads the stream independently
+  private async consumeStream(lastId = '$') {
+    if (!this.isConsuming) return;
+
+    try {
+      const results = await this.consumer.xread(
+        'BLOCK',
+        5000,
+        'STREAMS',
+        this.streamName,
+        lastId,
+      );
+
+      if (results && results.length > 0) {
+        const [, messages] = results[0];
+        for (const [messageId, fields] of messages) {
+          lastId = messageId;
+          const payloadStr = fields[fields.indexOf('payload') + 1];
+          const payload: SseEventPayload = JSON.parse(payloadStr);
+
+          const key = \\\`\\\\\${payload.userId}:\\\\\${payload.uniqueId}\\\`;
+          
+          // Only process if this Pod holds the connection
+          if (this.sseManager.hasConnection(key)) {
+            const res = this.sseManager.getConnection(key);
+            if (res) {
+              res.write(\\\`data: \\\\\${JSON.stringify(payload.data)}\\\\n\\\\n\\\`);
+              // Padding to flush buffers immediately
+              res.write('waiting... '.repeat(1024) + '\\\\n\\\\n');
+
+              if (payload.isFinal) {
+                this.sseManager.removeConnection(key); // will call res.end()
+              }
+            }
+          }
+        }
+      }
+    } catch (error) {
+      this.logger.error('Error consuming Redis Stream', error);
+    }
+
+    // Continue loop
+    if (this.isConsuming) {
+      setImmediate(() => this.consumeStream(lastId));
+    }
+  }
+}
+
+// ─── SSE HEARTBEAT CRON ────────────────────────────────────────────────────
+// src/api/sse/sse-heartbeat.service.ts
+import { Injectable, Logger } from '@nestjs/common';
+import { Cron, CronExpression } from '@nestjs/schedule';
+import { SseConnectionManager } from './sse-connection.manager';
+
+@Injectable()
+export class SseHeartbeatService {
+  private readonly logger = new Logger(SseHeartbeatService.name);
+
+  constructor(private readonly sseManager: SseConnectionManager) {}
+
+  // Run every 20 seconds to prevent Nginx/AWS ALB from dropping idle connections
+  @Cron('*/20 * * * * *')
+  handleHeartbeat() {
+    const connections = this.sseManager.getAllConnections();
+    if (connections.size === 0) return;
+
+    this.logger.debug(\\\`[Heartbeat] Sending ping to \\\\\${connections.size} active connections\\\`);
+    
+    for (const [key, res] of connections.entries()) {
+      res.write('event: heartbeat\\\\n');
+      res.write('data: ping\\\\n\\\\n');
+      res.write('waiting... '.repeat(1024) + '\\\\n\\\\n');
+    }
+  }
+}
+`
 };
